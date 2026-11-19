@@ -113,22 +113,20 @@ function Step2Interview({ interviewData, onFinish }) {
       };
 
 
-      utterance.onend = () => {
-        videoRef.current?.pause();
-        videoRef.current.currentTime = 0;
-        setIsAIPlaying(false);
+     utterance.onend = () => {
+  videoRef.current?.pause();
 
+  if (videoRef.current) {
+    videoRef.current.currentTime = 0;
+  }
 
+  setIsAIPlaying(false);
 
-        if (isMicOn) {
-          startMic();
-        }
-        setTimeout(() => {
-          setSubtitle("");
-          resolve();
-        }, 300);
-      };
-
+  setTimeout(() => {
+    setSubtitle("");
+    resolve();
+  }, 300);
+};
 
       setSubtitle(text);
 
@@ -202,34 +200,59 @@ function Step2Interview({ interviewData, onFinish }) {
 }, [currentIndex]);
 
 
-  useEffect(() => {
-    if (!("webkitSpeechRecognition" in window)) return;
+ 
+useEffect(() => {
+  if (!("webkitSpeechRecognition" in window)) {
+    console.log("Speech recognition is not supported");
+    return;
+  }
 
-    const recognition = new window.webkitSpeechRecognition();
-    recognition.lang = "en-US";
-    recognition.continuous = true;
-    recognition.interimResults = false;
+  const recognition = new window.webkitSpeechRecognition();
 
-    recognition.onresult = (event) => {
-      const transcript =
-        event.results[event.results.length - 1][0].transcript;
+  recognition.lang = "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = false;
 
-      setAnswer((prev) => prev + " " + transcript);
-    };
+  recognition.onresult = (event) => {
+    let transcript = "";
 
-    recognitionRef.current = recognition;
+    // Process only newly changed results
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) {
+        transcript += event.results[i][0].transcript;
+      }
+    }
 
-  }, []);
-
-
-  const startMic = () => {
-    if (recognitionRef.current && !isAIPlaying) {
-      try {
-        recognitionRef.current.start();
-      } catch { }
+    if (transcript.trim()) {
+      setAnswer((prev) =>
+        prev ? prev + " " + transcript.trim() : transcript.trim()
+      );
     }
   };
 
+  recognition.onerror = (event) => {
+    console.log("Speech recognition error:", event.error);
+  };
+
+  recognitionRef.current = recognition;
+
+  return () => {
+    recognition.stop();
+    recognitionRef.current = null;
+  };
+}, []);
+
+
+
+  const startMic = () => {
+  if (recognitionRef.current) {
+    try {
+      recognitionRef.current.start();
+    } catch (error) {
+      console.log("Microphone start error:", error);
+    }
+  }
+};
   const stopMic = () => {
     if (recognitionRef.current) {
       recognitionRef.current.stop();
@@ -279,10 +302,7 @@ setIsSubmitting(false)
 
     await speakText("Alright, let's move to the next question.");
 
-    setCurrentIndex(currentIndex + 1);
-    setTimeout(() => {
-      if (isMicOn) startMic();
-    }, 500);
+setCurrentIndex(currentIndex + 1);
 
    
   }
