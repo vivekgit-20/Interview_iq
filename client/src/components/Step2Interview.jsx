@@ -17,6 +17,8 @@ function Step2Interview({ interviewData, onFinish }) {
 
   const [isMicOn, setIsMicOn] = useState(true);
   const recognitionRef = useRef(null);
+  const shouldListenRef = useRef(false); // true = we WANT the mic running right now
+  const isMicOnRef = useRef(true);       // always-current copy of isMicOn
   const [isAIPlaying, setIsAIPlaying] = useState(false);
 
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -108,25 +110,32 @@ function Step2Interview({ interviewData, onFinish }) {
 
       utterance.onstart = () => {
         setIsAIPlaying(true);
-        stopMic()
+        stopMic(); // don't listen while the AI is talking
         videoRef.current?.play();
       };
 
 
-     utterance.onend = () => {
-  videoRef.current?.pause();
+      utterance.onend = () => {
+        videoRef.current?.pause();
 
-  if (videoRef.current) {
-    videoRef.current.currentTime = 0;
-  }
+        if (videoRef.current) {
+          videoRef.current.currentTime = 0;
+        }
 
-  setIsAIPlaying(false);
+        setIsAIPlaying(false);
 
-  setTimeout(() => {
-    setSubtitle("");
-    resolve();
-  }, 300);
-};
+        setTimeout(() => {
+          setSubtitle("");
+          resolve();
+        }, 300);
+      };
+
+      // Make sure the promise always resolves, even if speech fails
+      utterance.onerror = () => {
+        setIsAIPlaying(false);
+        setSubtitle("");
+        resolve();
+      };
 
       setSubtitle(text);
 
@@ -160,7 +169,8 @@ function Step2Interview({ interviewData, onFinish }) {
 
         await speakText(currentQuestion.question);
 
-        if (isMicOn) {
+        // Use the ref, not the state, so we get the current mic setting
+        if (isMicOnRef.current) {
           startMic();
         }
       }
@@ -177,7 +187,7 @@ function Step2Interview({ interviewData, onFinish }) {
   useEffect(() => {
     if (isIntroPhase) return;
     if (!currentQuestion) return;
-    
+
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -194,77 +204,117 @@ function Step2Interview({ interviewData, onFinish }) {
   }, [isIntroPhase, currentIndex])
 
   useEffect(() => {
-  if (!isIntroPhase && currentQuestion) {
-    setTimeLeft(currentQuestion.timeLimit || 60);
-  }
-}, [currentIndex]);
+    if (!isIntroPhase && currentQuestion) {
+      setTimeLeft(currentQuestion.timeLimit || 60);
+    }
+  }, [currentIndex]);
 
 
- 
-useEffect(() => {
-  if (!("webkitSpeechRecognition" in window)) {
-    console.log("Speech recognition is not supported");
-    return;
-  }
 
-  const recognition = new window.webkitSpeechRecognition();
+  /* ---------------- SPEECH RECOGNITION SETUP ---------------- */
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      console.log("Speech recognition is not supported in this browser");
+      return;
+    }
 
-  recognition.lang = "en-US";
-  recognition.continuous = true;
-  recognition.interimResults = false;
+    const recognition = new SR();
 
-  recognition.onresult = (event) => {
-    let transcript = "";
+    recognition.lang = "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = false;
 
-    // Process only newly changed results
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) {
-        transcript += event.results[i][0].transcript;
+    recognition.onresult = (event) => {
+      let transcript = "";
+
+      // Process only newly changed results
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        if (event.results[i].isFinal) {
+          transcript += event.results[i][0].transcript;
+        }
       }
-    }
 
-    if (transcript.trim()) {
-      setAnswer((prev) =>
-        prev ? prev + " " + transcript.trim() : transcript.trim()
-      );
-    }
-  };
+      if (transcript.trim()) {
+        setAnswer((prev) =>
+          prev ? prev + " " + transcript.trim() : transcript.trim()
+        );
+      }
+    };
 
-  recognition.onerror = (event) => {
-    console.log("Speech recognition error:", event.error);
-  };
+    // Chrome stops recognition on silence / errors / after a while.
+    // If we still want to listen, start it again.
+    recognition.onend = () => {
+      if (shouldListenRef.current) {
+        setTimeout(() => {
+          try {
+            if (shouldListenRef.current) recognition.start();
+          } catch (e) {
+            console.log("Microphone restart error:", e.message);
+          }
+        }, 250);
+      }
+    };
 
-  recognitionRef.current = recognition;
+    recognition.onerror = (event) => {
+      console.log("Speech recognition error:", event.error);
 
-  return () => {
-    recognition.stop();
-    recognitionRef.current = null;
-  };
-}, []);
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        shouldListenRef.current = false;
+        isMicOnRef.current = false;
+        setIsMicOn(false);
+        alert("Microphone access is blocked. Click the lock icon in the address bar and allow the microphone, then reload the page.");
+      }
+
+      if (event.error === "audio-capture") {
+        shouldListenRef.current = false;
+        alert("No microphone found. Check that your mic is connected and selected.");
+      }
+
+      if (event.error === "network") {
+        console.log("Speech service unreachable. Use Chrome/Edge and check your internet connection.");
+      }
+    };
+
+    recognitionRef.current = recognition;
+
+    return () => {
+      shouldListenRef.current = false;
+      recognition.onend = null;
+      try { recognition.abort(); } catch (e) {}
+      recognitionRef.current = null;
+    };
+  }, []);
 
 
 
   const startMic = () => {
-  if (recognitionRef.current) {
+    shouldListenRef.current = true;
     try {
-      recognitionRef.current.start();
+      recognitionRef.current?.start();
     } catch (error) {
-      console.log("Microphone start error:", error);
-    }
-  }
-};
-  const stopMic = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
+      // "already started" is harmless
+      console.log("Microphone start error:", error.message);
     }
   };
+
+  const stopMic = () => {
+    shouldListenRef.current = false;
+    try {
+      recognitionRef.current?.stop();
+    } catch (e) {}
+  };
+
   const toggleMic = () => {
-    if (isMicOn) {
-      stopMic();
+    const next = !isMicOn;
+    setIsMicOn(next);
+    isMicOnRef.current = next;
+
+    if (next) {
+      if (!isAIPlaying) startMic(); // don't listen while the AI is talking
     } else {
-      startMic();
+      stopMic();
     }
-    setIsMicOn(!isMicOn);
   };
 
 
@@ -280,18 +330,18 @@ useEffect(() => {
         answer,
         timeTaken:
           currentQuestion.timeLimit - timeLeft,
-      } , {withCredentials:true})
+      }, { withCredentials: true })
 
       setFeedback(result.data.feedback)
       speakText(result.data.feedback)
       setIsSubmitting(false)
     } catch (error) {
-console.log(error)
-setIsSubmitting(false)
+      console.log(error)
+      setIsSubmitting(false)
     }
   }
 
-  const handleNext =async () => {
+  const handleNext = async () => {
     setAnswer("");
     setFeedback("");
 
@@ -302,16 +352,17 @@ setIsSubmitting(false)
 
     await speakText("Alright, let's move to the next question.");
 
-setCurrentIndex(currentIndex + 1);
+    setCurrentIndex(currentIndex + 1);
 
-   
+
   }
 
   const finishInterview = async () => {
     stopMic()
     setIsMicOn(false)
+    isMicOnRef.current = false;
     try {
-      const result = await axios.post(ServerUrl+ "/api/interview/finish" , { interviewId} , {withCredentials:true})
+      const result = await axios.post(ServerUrl + "/api/interview/finish", { interviewId }, { withCredentials: true })
 
       console.log(result.data)
       onFinish(result.data)
@@ -321,7 +372,7 @@ setCurrentIndex(currentIndex + 1);
   }
 
 
-   useEffect(() => {
+  useEffect(() => {
     if (isIntroPhase) return;
     if (!currentQuestion) return;
 
@@ -332,11 +383,6 @@ setCurrentIndex(currentIndex + 1);
 
   useEffect(() => {
     return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-        recognitionRef.current.abort();
-      }
-
       window.speechSynthesis.cancel();
     };
   }, []);
@@ -432,35 +478,35 @@ setCurrentIndex(currentIndex + 1);
             className="flex-1 bg-gray-100 p-4 sm:p-6 rounded-2xl resize-none outline-none border border-gray-200 focus:ring-2 focus:ring-emerald-500 transition text-gray-800" />
 
 
-         {!feedback ? ( <div className='flex items-center gap-4 mt-6'>
+          {!feedback ? (<div className='flex items-center gap-4 mt-6'>
             <motion.button
               onClick={toggleMic}
               whileTap={{ scale: 0.9 }}
               className='w-12 h-12 sm:w-14 sm:h-14 flex items-center justify-center rounded-full bg-black text-white shadow-lg'>
-              {isMicOn ? <FaMicrophone size={20} /> : <FaMicrophoneSlash size={20}/>}
+              {isMicOn ? <FaMicrophone size={20} /> : <FaMicrophoneSlash size={20} />}
             </motion.button>
 
             <motion.button
-            onClick={submitAnswer}
-            disabled={isSubmitting}
+              onClick={submitAnswer}
+              disabled={isSubmitting}
               whileTap={{ scale: 0.95 }}
               className='flex-1 bg-gradient-to-r from-emerald-600 to-teal-500 text-white py-3 sm:py-4 rounded-2xl shadow-lg hover:opacity-90 transition font-semibold disabled:bg-gray-500'>
-              {isSubmitting?"Submitting...":"Submit Answer"}
+              {isSubmitting ? "Submitting..." : "Submit Answer"}
 
             </motion.button>
 
-          </div>):(
-            <motion.div 
-             initial={{ opacity: 0 }}
+          </div>) : (
+            <motion.div
+              initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-            className='mt-6 bg-emerald-50 border border-emerald-200 p-5 rounded-2xl shadow-sm'>
+              className='mt-6 bg-emerald-50 border border-emerald-200 p-5 rounded-2xl shadow-sm'>
               <p className='text-emerald-700 font-medium mb-4'>{feedback}</p>
 
               <button
-              onClick={handleNext}
+                onClick={handleNext}
 
-               className='w-full bg-gradient-to-r from-emerald-600 to-teal-500 text-white py-3 rounded-xl shadow-md hover:opacity-90 transition flex items-center justify-center gap-1'>
-                Next Question <BsArrowRight size={18}/>
+                className='w-full bg-gradient-to-r from-emerald-600 to-teal-500 text-white py-3 rounded-xl shadow-md hover:opacity-90 transition flex items-center justify-center gap-1'>
+                Next Question <BsArrowRight size={18} />
               </button>
 
             </motion.div>
